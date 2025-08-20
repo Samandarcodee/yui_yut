@@ -1,0 +1,23 @@
+{
+  "builds": [
+    {
+      "src": "main.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "main.py"
+    }
+  ],
+  "env": {
+    "ADMIN_IDS": "5928372261",
+    "STARS_ENABLED": "true",
+    "SIMULATE_DONATION": "false",
+    "INITIAL_SPINS": "5",
+    "WIN_ADDS_SPINS": "true",
+    "REFERRAL_BONUS": "5",
+    "DAILY_BONUS_SPINS": "5"
+  }
+}

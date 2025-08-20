@@ -1,0 +1,16 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python main.py"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+[env]
+ADMIN_IDS = "5928372261"
+STARS_ENABLED = "true"
+SIMULATE_DONATION = "false"
+INITIAL_SPINS = "5"
+WIN_ADDS_SPINS = "true"
+REFERRAL_BONUS = "5"
+DAILY_BONUS_SPINS = "5"

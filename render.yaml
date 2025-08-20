@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: stars-yut-bot
+    env: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        value: "5928372261"
+      - key: STARS_ENABLED
+        value: "true"
+      - key: SIMULATE_DONATION
+        value: "false"
+      - key: INITIAL_SPINS
+        value: "5"
+      - key: WIN_ADDS_SPINS
+        value: "true"
+      - key: REFERRAL_BONUS
+        value: "5"
+      - key: DAILY_BONUS_SPINS
+        value: "5"
+    autoDeploy: true
