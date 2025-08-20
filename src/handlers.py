@@ -1,0 +1,785 @@
+from typing import Optional, Callable, Awaitable
+
+from aiogram import Router, F
+from aiogram.filters import Command
+from aiogram.types import Message, CallbackQuery, LabeledPrice, PreCheckoutQuery
+from aiogram.exceptions import TelegramBadRequest
+
+from .config import get_settings
+from . import db
+from .slot import spin
+from .keyboards import main_menu, donation_options, play_again_menu, channel_subscription_menu
+
+
+router = Router()
+settings = get_settings()
+
+
+def _parse_utm(arg: str) -> tuple[Optional[str], Optional[str]]:
+    try:
+        qs = arg.split("?", 1)[1]
+        params = dict(p.split("=", 1) for p in qs.split("&") if "=" in p)
+    except Exception:
+        params = {}
+    return params.get("src"), params.get("cmp") or params.get("campaign")
+
+
+def _extract_ref_with_utm(text: Optional[str]) -> tuple[Optional[int], Optional[str], Optional[str]]:
+    # Format: /start or /start ref_123[?src=...&cmp=...]
+    if not text:
+        return None, None, None
+    parts = text.split()
+    if len(parts) < 2:
+        return None, None, None
+    arg = parts[1]
+    if arg.startswith("ref_"):
+        try:
+            base = arg.split("?", 1)[0]
+            ref_id = int(base[4:])
+            src, cmp_ = _parse_utm(arg)
+            return ref_id, src, cmp_
+        except ValueError:
+            return None, None, None
+    return None, None, None
+
+
+async def _check_channel_subscription(bot, user_id: int, channel_username: str) -> bool:
+    """Foydalanuvchining kanalga a'zoligini tekshirish.
+    Xatoliklarda qat'iy ravishda False qaytaramiz (tekshiruv majburiy)."""
+    try:
+        member = await bot.get_chat_member(chat_id=f"@{channel_username.lstrip('@')}", user_id=user_id)
+        return getattr(member, "status", "") in {"member", "administrator", "creator"}
+    except Exception:
+        # Bot kanalga qo'shilmagan yoki admin emas — tekshiruvdan o'tkazmaymiz
+        return False
+
+
+# Shared flows to reuse between message and callback contexts
+async def _spin_flow(user_id: int, reply: Callable[..., Awaitable[None]], edit_message: Optional[Message] = None) -> None:
+    data = await db.get_user(user_id)
+    if not data:
+        # Avtomatik ro'yxatga olish (agar /start bosilmagan bo'lsa ham)
+        await db.upsert_user(user_id=user_id, username=None, first_name=None, last_name=None, initial_spins=settings.initial_spins)
+        data = await db.get_user(user_id)
+        if not data:  # Bu holat bo'lmasligi kerak, lekin ehtiyot uchun
+            await reply("Xatolik yuz berdi. Iltimos qayta urinib ko'ring.")
+            return
+    is_admin = _is_admin(user_id) or bool(data.get("free_play"))
+    if data.get("is_banned"):
+        await reply("🚫 Siz bloklangansiz.")
+        return
+    if not is_admin and data["spins"] <= 0:
+        if edit_message:
+            await edit_message.edit_text("Spinlar tugadi. ⭐ hadya qiling va davom eting!", reply_markup=donation_options(settings.channel_username))
+        else:
+            await reply("Spinlar tugadi. ⭐ hadya qiling va davom eting!", reply_markup=donation_options(settings.channel_username))
+        return
+
+    if not is_admin:
+        await db.add_spins(user_id, -1)
+
+    result = spin(with_house_edge=True)
+    if result.is_win:
+        await db.add_stars(user_id, result.payout)
+        await db.set_biggest_win_if_greater(user_id, result.payout)
+    await db.record_spin(user_id, result.reels, result.payout, result.is_win)
+
+    fresh = await db.get_user(user_id)
+    remain = fresh["spins"] if fresh else max(0, data["spins"] - (0 if is_admin else 1))
+    last_win = result.payout if result.is_win else None
+    if result.is_win:
+        text = (
+            f"Natija: {result.reels[0]} | {result.reels[1]} | {result.reels[2]}\n"
+            f"🎉 Tabriklaymiz! Siz {result.payout} Stars yutdingiz!\n"
+            f"🎮 Qolgan urinishlar: {remain}"
+        )
+    else:
+        text = (
+            f"Natija: {result.reels[0]} | {result.reels[1]} | {result.reels[2]}\n"
+            f"❌ Afsus, bu safar omad kulmadi.\n"
+            f"🎮 Qolgan urinishlar: {remain}"
+        )
+
+    # Xabarni yangilash yoki yuborish (gamble tugmasi bilan)
+    markup = play_again_menu(last_win)
+    if edit_message:
+        try:
+            await edit_message.edit_text(text, reply_markup=markup)
+        except TelegramBadRequest:
+            await reply(text, reply_markup=markup)
+    else:
+        await reply(text, reply_markup=markup)
+
+
+async def _profile_flow(user_id: int, reply: Callable[..., Awaitable[None]]) -> None:
+    data = await db.get_user_with_stats(user_id)
+    if not data:
+        # Avtomatik ro'yxatga olish
+        await db.upsert_user(user_id=user_id, username=None, first_name=None, last_name=None, initial_spins=settings.initial_spins)
+        data = await db.get_user_with_stats(user_id)
+        if not data:  # Bu holat bo'lmasligi kerak
+            await reply("Xatolik yuz berdi. Iltimos qayta urinib ko'ring.")
+            return
+    invited = await db.count_invited(user_id)
+    text = (
+        f"👤 ID: {user_id}\n"
+        f"⭐ Yulduzlar: {data['stars']}\n"
+        f"🎰 Urinishlar: {data['spins']}\n"
+        f"🏆 Eng katta yutuq: {data['biggest_win']}\n"
+        f"🧮 Jami spinlar: {data.get('total_spins') or 0}\n"
+        f"🥇 Jami yutuqlar (⭐): {data.get('total_stars_won') or 0}\n"
+        f"👥 Taklif qilingan do‘stlar: {invited}"
+    )
+    await reply(text)
+
+
+async def _daily_flow(user_id: int, reply: Callable[..., Awaitable[None]]) -> None:
+    from datetime import datetime
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    # ensure user exists
+    if not await db.get_user(user_id):
+        await db.upsert_user(user_id=user_id, username=None, first_name=None, last_name=None, initial_spins=settings.initial_spins)
+    if await db.can_claim_daily_bonus(user_id, today):
+        await db.add_spins(user_id, settings.daily_bonus_spins)
+        await db.set_daily_claimed(user_id, today)
+        await reply(f"Kunlik bonus: +{settings.daily_bonus_spins} spin berildi! 🎁")
+    else:
+        await reply("Bugun allaqachon bonus olgansiz. Ertaga qaytib keling!")
+
+@router.message(Command("start"))
+async def cmd_start(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    
+    # Debug ma'lumotlari
+    print(f"DEBUG: User ID: {user.id}")
+    print(f"DEBUG: Mandatory channel: {settings.mandatory_channel}")
+    print(f"DEBUG: Is admin: {_is_admin(user.id)}")
+    print(f"DEBUG: Admin IDs: {settings.admin_ids}")
+    
+    # Majburiy kanal a'zoligini tekshirish
+    if settings.mandatory_channel and not _is_admin(user.id):
+        print(f"DEBUG: Checking subscription for channel: {settings.mandatory_channel}")
+        is_subscribed = await _check_channel_subscription(message.bot, user.id, settings.mandatory_channel)
+        print(f"DEBUG: Is subscribed: {is_subscribed}")
+        if not is_subscribed:
+            await message.answer(
+                "🔒 <b>Botdan foydalanish uchun avval kanalga a'zo bo'ling!</b>\n\n"
+                "📢 Quyidagi kanalga a'zo bo'ling va keyin \"✅ A'zolikni tekshirish\" tugmasini bosing:",
+                reply_markup=channel_subscription_menu(settings.mandatory_channel)
+            )
+            return
+    
+    referrer_id, utm_src, utm_cmp = _extract_ref_with_utm(message.text)
+    # If user exists already, keep their original referred_by
+    existing = await db.get_user(user.id)
+    referred_by = existing.get("referred_by") if existing else referrer_id
+    await db.upsert_user(
+        user_id=user.id,
+        username=user.username,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        referred_by=referred_by,
+        initial_spins=settings.initial_spins if existing is None else 0,  # Faqat yangi userlar uchun
+    )
+    # Save UTM tags
+    await db.update_user_utm(user.id, utm_src, utm_cmp)
+
+
+async def _ensure_access(user_id: int, bot, reply: Callable[..., Awaitable[None]]) -> bool:
+    """Majburiy kanalga a'zolikni umumiy tekshiruvchi yordamchi."""
+    if settings.mandatory_channel and not _is_admin(user_id):
+        is_subscribed = await _check_channel_subscription(bot, user_id, settings.mandatory_channel)
+        if not is_subscribed:
+            await reply(
+                "🔒 Iltimos, avval kanalga a'zo bo'ling, so'ngra qayta urinib ko'ring.",
+                reply_markup=channel_subscription_menu(settings.mandatory_channel),
+            )
+            return False
+    return True
+    # Apply referral bonus once on first registration if referrer exists and not self
+    if referrer_id and (existing is None) and referrer_id != user.id:
+        await db.increment_referrer_stars(referrer_id, settings.referral_bonus)
+
+    # Apply referral on first join
+    if referrer_id and (existing is None) and referrer_id != user.id:
+        await db.increment_referrer_stars(referrer_id, settings.referral_bonus)
+        # Level-2
+        ref1 = await db.get_user(referrer_id)
+        if ref1 and ref1.get("referred_by") and int(ref1["referred_by"]) != user.id:
+            from math import floor
+            await db.increment_level2_referrer_stars(int(ref1["referred_by"]), max(1, floor(settings.referral_bonus / 2)))
+
+    # Faqat reply keyboard menyu ko'rsatish
+    await message.answer(
+        (
+            "<b>✨ STARS YUT ✨</b>\n"
+            "🎰 <b>Slot o'yiniga xush kelibsiz!</b>\n\n"
+            "🎁 <b>10 ta bepul spin</b> bilan boshlang!\n"
+            "📆 Har kuni kunlik bonus oling\n\n"
+            "👇 <b>Quyidagi menyudan tanlang</b>"
+        ),
+        reply_markup=main_menu(),
+    )
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    await message.answer(
+        (
+            "<b>❓ Yordam</b>\n\n"
+            "Quyidagi bo'limlardan foydalaning:\n"
+            "• 🎰 O'ynash — slot o'yinini boshlash\n"
+            "• 👤 Profil — balans va statistika\n"
+            "• 🏆 TOP — eng yaxshi o'yinchilar\n"
+            "• 📆 Kunlik bonus — har kuni bepul spin\n"
+            "• ⭐ Yulduz olish — spin sotib olish\n"
+            "• 📈 Tarix — oxirgi o'yinlar\n"
+        )
+    )
+
+
+@router.message(Command("profile"))
+async def cmd_profile(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    data = await db.get_user_with_stats(user.id)
+    if not data:
+        await message.answer("Avval /start bosing.")
+        return
+    invited = await db.count_invited(user.id)
+    text = (
+        f"👤 Ism: {user.full_name}\n"
+        f"⭐ Yulduzlar: {data['stars']}\n"
+        f"🎰 Urinishlar: {data['spins']}\n"
+        f"🏆 Eng katta yutuq: {data['biggest_win']}\n"
+        f"🧮 Jami spinlar: {data.get('total_spins') or 0}\n"
+        f"🥇 Jami yutuqlar (⭐): {data.get('total_stars_won') or 0}\n"
+        f"👥 Taklif qilingan do‘stlar: {invited}"
+    )
+    await message.answer(text)
+
+
+@router.message(Command("top"))
+async def cmd_top(message: Message) -> None:
+    players = await db.get_top_by_stars(10)
+    if not players:
+        await message.answer("Hali reyting bo‘sh.")
+        return
+    lines = ["🏆 Eng yaxshi o‘yinchilar (yulduzlar):"]
+    for idx, p in enumerate(players, start=1):
+        uname = p.get("username") or str(p["user_id"]) 
+        lines.append(f"{idx}. @{uname} — ⭐ {p['stars']}")
+    await message.answer("\n".join(lines))
+
+
+@router.message(Command("referral"))
+async def cmd_referral(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    me = await message.bot.get_me()
+    link = f"https://t.me/{me.username}?start=ref_{user.id}"
+    invited = await db.count_invited(user.id)
+    await message.answer(
+        f"Do‘stlaringizni taklif qiling: {link}\n"
+        f"Har bir do‘st uchun +{settings.referral_bonus} ⭐\n"
+        f"Hozirgacha takliflar: {invited}"
+    )
+
+
+@router.message(Command("spin"))
+async def cmd_spin(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    # Access check
+    ok = await _ensure_access(user.id, message.bot, message.answer)
+    if not ok:
+        return
+    await _spin_flow(user.id, message.answer)
+
+
+# Text buttons mapping (emoji-based to avoid apostrophe variants)
+@router.message(F.text.regexp(r'^🎰'))
+async def btn_play(message: Message) -> None:
+    # Access check
+    ok = await _ensure_access(message.from_user.id, message.bot, message.answer)  # type: ignore[arg-type]
+    if not ok:
+        return
+    await cmd_spin(message)
+
+
+@router.message(F.text.regexp(r'^👤'))
+async def btn_profile(message: Message) -> None:
+    await cmd_profile(message)
+
+
+@router.message(F.text.regexp(r'^🏆'))
+async def btn_top(message: Message) -> None:
+    await cmd_top(message)
+
+
+@router.message(F.text.regexp(r'^📆'))
+async def btn_daily(message: Message) -> None:
+    await cmd_daily(message)
+
+
+@router.message(F.text.regexp(r'^⭐ Stars'))
+async def btn_balance(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    data = await db.get_user_with_stats(user.id)
+    if not data:
+        await message.answer("Avval /start bosing.")
+        return
+    await message.answer(f"⭐ Sizning Stars hisobingiz: <b>{data['stars']}</b>\n🎰 Qolgan spinlar: <b>{data['spins']}</b>")
+
+
+@router.message(F.text.regexp(r'^🎁'))
+async def btn_referral(message: Message) -> None:
+    await cmd_referral(message)
+
+
+@router.message(F.text.regexp(r'^📜'))
+async def btn_rules(message: Message) -> None:
+    await message.answer(
+        "📜 <b>O'yin qoidalari:</b>\n\n"
+        "🎰 <b>Slot kombinatsiyalari:</b>\n"
+        "💎💎💎 → +100 ⭐\n"
+        "🔔🔔🔔 → +50 ⭐\n"
+        "🍒🍒🍒 → +25 ⭐\n"
+        "⭐⭐⭐ → +10 ⭐\n"
+        "🍀🍀🍀 → +5 ⭐\n"
+        "🔥🔥🔥 → +3 ⭐\n"
+        "🎲🎲🎲 → +1 ⭐\n"
+        "2 ta bir xil → +1 ⭐\n\n"
+        "📊 <b>O'yin haqida:</b> Kombinatsiyaga qarab yulduzlar beriladi\n"
+        "📆 <b>Kunlik bonus:</b> Har kuni 5 ta bepul spin\n"
+        "👥 <b>Referral:</b> Har bir do'st uchun +5 ⭐"
+    )
+
+
+@router.message(F.text.regexp(r'^⭐ Yulduz'))
+async def btn_buy_stars(message: Message) -> None:
+    await btn_donate(message)
+
+
+@router.message(F.text.regexp(r'^📈'))
+async def btn_history(message: Message) -> None:
+    await cmd_account(message)
+
+
+@router.message(F.text.regexp(r'^❓'))
+async def btn_help(message: Message) -> None:
+    await cmd_help(message)
+
+
+# Home menu callbacks olib tashlandi - endi Reply keyboard orqali ishlaydi
+
+
+@router.callback_query(F.data == "play_again")
+async def cb_play_again(call: CallbackQuery) -> None:
+    await call.answer()
+    user = call.from_user
+    assert user is not None
+    # Access check
+    ok = await _ensure_access(user.id, call.bot, call.message.answer)  # type: ignore[arg-type]
+    if not ok:
+        return
+    # Ensure user exists before playing again
+    if not await db.get_user(user.id):
+        await db.upsert_user(user_id=user.id, username=user.username, first_name=user.first_name, last_name=user.last_name, initial_spins=settings.initial_spins)
+    # Bu yerda edit_message orqali xabarni yangilaymiz
+    await _spin_flow(user.id, call.message.answer, edit_message=call.message)
+
+
+@router.callback_query(F.data.startswith("gamble:"))
+async def cb_gamble(call: CallbackQuery) -> None:
+    """Oxirgi yutishni xavfga qo'yish: 50/50 bilan x2 yoki 0.
+    Adminlar balans ta'sirisiz sinab ko'ra oladi."""
+    await call.answer()
+    user = call.from_user
+    assert user is not None
+
+    # Access check
+    ok = await _ensure_access(user.id, call.bot, call.message.answer)  # type: ignore[arg-type]
+    if not ok:
+        return
+
+    try:
+        amount = int(call.data.split(":", 1)[1])
+    except Exception:
+        await call.message.answer("Xatolik")
+        return
+
+    # Oddiy 50/50 gamble
+    import random
+    win = random.random() < 0.5
+    delta = amount if win else -amount
+
+    # Adminlar balansini o'zgartirmaymiz
+    if not _is_admin(user.id):
+        await db.add_stars(user.id, delta)
+
+    text = (
+        (f"🎲 Gamble natijasi: G'ALABA! +{amount} ⭐\n") if win else (f"🎲 Gamble natijasi: YUTQAZDINGIZ. -{amount} ⭐\n")
+    )
+    data = await db.get_user_with_stats(user.id)
+    stars = data['stars'] if data else 0
+    text += f"⭐ Hozirgi balans: {stars}"
+
+    try:
+        await call.message.edit_text(text, reply_markup=play_again_menu())
+    except TelegramBadRequest:
+        await call.message.answer(text, reply_markup=play_again_menu())
+
+
+# Profile va top callback'lari olib tashlandi
+
+
+@router.callback_query(F.data == "check_subscription")
+async def check_subscription_callback(call: CallbackQuery) -> None:
+    """Kanal a'zoligini tekshirish callback'i"""
+    await call.answer()
+    user = call.from_user
+    assert user is not None
+    
+    if not settings.mandatory_channel:
+        await call.message.edit_text("⚠️ Majburiy kanal sozlanmagan.")
+        return
+    
+    # Admin bo'lsa, a'zolik tekshirmasdan o'tkazish
+    if _is_admin(user.id):
+        await call.message.edit_text(
+            "👑 <b>Admin sifatida botga xush kelibsiz!</b>\n\n"
+            "🎰 <b>Slot o'yiniga xush kelibsiz!</b>\n\n"
+            "🎁 Cheksiz spin sizning ixtiyoringizda!\n"
+            "📆 Har kuni kunlik bonus oling\n\n"
+            "Quyidagi menyudan foydalaning:",
+            reply_markup=None
+        )
+        await call.message.answer("Admin menyusi faol!", reply_markup=main_menu())
+        return
+    
+    # Oddiy foydalanuvchi uchun a'zolik tekshirish
+    is_subscribed = await _check_channel_subscription(call.bot, user.id, settings.mandatory_channel)
+    if is_subscribed:
+        # A'zo bo'lgan, botga kirish ruxsati berish
+        await call.message.edit_text(
+            "✅ <b>Ajoyib! Siz kanalga a'zo bo'lgansiz!</b>\n\n"
+            "🎰 <b>Slot o'yiniga xush kelibsiz!</b>\n\n"
+            "🎁 Yangi foydalanuvchilar uchun <b>10 ta bepul spin!</b>\n"
+            "📆 Har kuni kunlik bonus oling\n\n"
+            "Quyidagi menyudan foydalaning:",
+            reply_markup=None
+        )
+        await call.message.answer("Menyu faol!", reply_markup=main_menu())
+        
+        # Foydalanuvchini bazaga qo'shish
+        existing = await db.get_user(user.id)
+        if not existing:
+            await db.upsert_user(
+                user_id=user.id,
+                username=user.username,
+                first_name=user.first_name,
+                last_name=user.last_name,
+                initial_spins=settings.initial_spins
+            )
+    else:
+        # Hali a'zo bo'lmagan
+        await call.message.edit_text(
+            "❌ <b>Siz hali kanalga a'zo bo'lmagansiz!</b>\n\n"
+            "📢 Iltimos, avval kanalga a'zo bo'ling va keyin qayta tekshiring:",
+            reply_markup=channel_subscription_menu(settings.mandatory_channel)
+        )
+
+
+@router.message(F.text.regexp(r'^⭐'))
+async def btn_donate(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    if _is_admin(user.id):
+        await message.answer("Siz admin siz. Bepul o‘ynashingiz mumkin. 🎰 /spin")
+        return
+    if settings.stars_enabled:
+        await message.answer("Qancha ⭐ xarid qilasiz?", reply_markup=donation_options(settings.channel_username))
+    else:
+        await message.answer("To‘lov hozircha o‘chirilgan.")
+
+
+# Simulated donation via callbacks (20/30/50 stars → equal spins)
+@router.callback_query(F.data.startswith("donate:"))
+async def cb_donate(call: CallbackQuery) -> None:
+    user = call.from_user
+    assert user is not None
+    amount_str = call.data.split(":", 1)[1]
+    try:
+        amount = int(amount_str)
+    except ValueError:
+        await call.answer("Xatolik", show_alert=True)
+        return
+
+    # Real Telegram Stars via sendInvoice (currency XTR) — 1 star = 1 spin
+    if settings.stars_enabled:
+        title = f"{amount} ⭐ paket"
+        description = "Slot o‘yini uchun spinlar"
+        payload = f"stars:{amount}"
+        currency = "XTR"
+        prices = [LabeledPrice(label=f"{amount} ⭐", amount=amount)]  # amount is in star units for XTR
+        try:
+            # Stars uchun provider_token talab qilinmaydi. Agar foydalanuvchi kiritgan bo‘lsa, qo‘shamiz.
+            invoice_kwargs = dict(
+                title=title,
+                description=description,
+                payload=payload,
+                currency=currency,
+                prices=prices,
+            )
+            if settings.provider_token:  # faqat mavjud bo‘lsa yuboramiz
+                invoice_kwargs["provider_token"] = settings.provider_token
+            await call.message.answer_invoice(**invoice_kwargs)
+        except TelegramBadRequest as e:
+            await call.message.answer(
+                "❌ To‘lov xatoligi yuz berdi!\n"
+                "🔧 Sabab: Telegram Stars to‘lov tizimi botingizda sozlanmagan.\n\n"
+                "Yechim:\n"
+                "- @BotFather → MyBots → Bot Settings → Payments → Stars: Yoqing\n"
+                "- Agar kerak bo‘lsa, Provider token qo‘shing\n"
+                "- Keyin qayta urinib ko‘ring"
+            )
+        await call.answer()
+        return
+
+    # Fallback: simulated (dev/testing)
+    await db.add_spins(user.id, amount)
+    await call.message.answer(f"(Dev) {amount} ⭐ hadya: {amount} spin berildi.")
+    await call.answer()
+
+
+@router.pre_checkout_query()
+async def process_pre_checkout_query(pre_checkout_q: PreCheckoutQuery) -> None:
+    # Approve checkout
+    await pre_checkout_q.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def successful_payment_handler(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    sp = message.successful_payment
+    if not sp:
+        return
+    payload = sp.invoice_payload or ""
+    if payload.startswith("stars:"):
+        try:
+            amount = int(payload.split(":", 1)[1])
+        except ValueError:
+            return
+        await db.add_spins(user.id, amount)
+        await db.log_payment(user.id, kind="stars_invoice", stars=amount, spins_added=amount)
+        await message.answer(f"To‘lov muvaffaqiyatli. {amount} spin berildi. 🎰 /spin")
+
+
+# Admin area
+def _is_admin(user_id: int) -> bool:
+    return user_id in settings.admin_ids
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    if not _is_admin(user.id):
+        return
+    kpis = await db.compute_kpis()
+    await message.answer(
+        "📈 Statistika:\n"
+        f"DAU: {kpis['dau']} | WAU: {kpis['wau']} | MAU: {kpis['mau']}\n"
+        f"Users: {kpis['users']} | Payers: {kpis['payers']}\n"
+        f"Conversion: {kpis['conversion']:.2%}\n"
+        f"ARPU (⭐): {kpis['arpu_stars']:.2f}\n"
+    )
+
+
+@router.message(Command("account"))
+async def cmd_account(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    data = await db.get_user_with_stats(user.id)
+    if not data:
+        await message.answer("Avval /start bosing.")
+        return
+    spins_log = await db.get_recent_spins(user.id, 10)
+    lines = ["📜 Oxirgi 10 o‘yin:"]
+    for r in spins_log:
+        status = "+" + str(r["payout"]) + "⭐" if r["is_win"] else "0"
+        lines.append(f"{r['r1']}|{r['r2']}|{r['r3']} → {status}")
+    await message.answer("\n".join(lines) if len(lines) > 1 else "Hali tarix yo‘q.")
+
+
+@router.message(Command("ban"))
+async def cmd_ban(message: Message) -> None:
+    user = message.from_user; assert user is not None
+    if not _is_admin(user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Foydalanish: /ban @username")
+        return
+    target = await db.get_user_by_username(parts[1].lstrip("@"))
+    if not target:
+        await message.answer("Topilmadi")
+        return
+    await db.set_ban(int(target["user_id"]), True)
+    await message.answer("Foydalanuvchi ban qilindi")
+
+
+@router.message(Command("unban"))
+async def cmd_unban(message: Message) -> None:
+    user = message.from_user; assert user is not None
+    if not _is_admin(user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        await message.answer("Foydalanish: /unban @username")
+        return
+    target = await db.get_user_by_username(parts[1].lstrip("@"))
+    if not target:
+        await message.answer("Topilmadi")
+        return
+    await db.set_ban(int(target["user_id"]), False)
+    await message.answer("Ban olib tashlandi")
+
+
+@router.message(Command("freeplay"))
+async def cmd_freeplay(message: Message) -> None:
+    user = message.from_user; assert user is not None
+    if not _is_admin(user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 3:
+        await message.answer("Foydalanish: /freeplay @username on|off")
+        return
+    target = await db.get_user_by_username(parts[1].lstrip("@"))
+    if not target:
+        await message.answer("Topilmadi")
+        return
+    await db.set_free_play(int(target["user_id"]), parts[2].lower() == "on")
+    await message.answer("Free play yangilandi")
+
+
+@router.message(Command("setvip"))
+async def cmd_setvip(message: Message) -> None:
+    user = message.from_user; assert user is not None
+    if not _is_admin(user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 3:
+        await message.answer("Foydalanish: /setvip @username 0|1|2|3")
+        return
+    try:
+        level = int(parts[2])
+    except ValueError:
+        await message.answer("Noto‘g‘ri daraja")
+        return
+    target = await db.get_user_by_username(parts[1].lstrip("@"))
+    if not target:
+        await message.answer("Topilmadi")
+        return
+    await db.set_vip_level(int(target["user_id"]), level)
+    await message.answer("VIP daraja yangilandi")
+
+
+@router.message(Command("daily"))
+async def cmd_daily(message: Message) -> None:
+    from datetime import datetime
+    user = message.from_user
+    assert user is not None
+    # Ensure user exists
+    if not await db.get_user(user.id):
+        await db.upsert_user(user_id=user.id, username=user.username, first_name=user.first_name, last_name=user.last_name, initial_spins=settings.initial_spins)
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    if await db.can_claim_daily_bonus(user.id, today):
+        await db.add_spins(user.id, settings.daily_bonus_spins)
+        await db.set_daily_claimed(user.id, today)
+        await message.answer(f"Kunlik bonus: +{settings.daily_bonus_spins} spin berildi! 🎁")
+    else:
+        await message.answer("Bugun allaqachon bonus olgansiz. Ertaga qaytib keling!")
+
+
+@router.message(Command("broadcast"))
+async def cmd_broadcast(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    if not _is_admin(user.id):
+        return
+    # Usage: /broadcast all|active7|vip <matn>
+    parts = (message.text or "").split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer("Foydalanish: /broadcast all|active7|vip <matn>")
+        return
+    segment, text = parts[1], parts[2]
+    if segment == "all":
+        targets = await db.get_active_user_ids(90)
+    elif segment.startswith("active") and segment[6:].isdigit():
+        targets = await db.get_active_user_ids(int(segment[6:]))
+    elif segment == "vip":
+        targets = await db.get_vip_user_ids()
+    else:
+        await message.answer("Segment noto‘g‘ri. all|active7|vip")
+        return
+    sent = 0
+    for uid in targets:
+        try:
+            await message.bot.send_message(uid, text)
+            sent += 1
+        except Exception:
+            pass
+    await message.answer(f"Broadcast yuborildi: {sent}/{len(targets)}")
+
+
+@router.message(Command("addspins"))
+async def cmd_addspins(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    if not _is_admin(user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 3:
+        await message.answer("Foydalanish: /addspins @username 10")
+        return
+    target_username = parts[1].lstrip("@")
+    try:
+        amount = int(parts[2])
+    except ValueError:
+        await message.answer("Noto‘g‘ri miqdor")
+        return
+
+    target = await db.get_user_by_username(target_username)
+    target_id = target["user_id"] if target else user.id
+    await db.add_spins(int(target_id), amount)
+    await message.answer(f"{('@'+target_username) if target else '(self)'} ga {amount} spin qo‘shildi.")
+
+
+@router.message(Command("addstars"))
+async def cmd_addstars(message: Message) -> None:
+    user = message.from_user
+    assert user is not None
+    if not _is_admin(user.id):
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 3:
+        await message.answer("Foydalanish: /addstars @username 20")
+        return
+    target_username = parts[1].lstrip("@")
+    try:
+        amount = int(parts[2])
+    except ValueError:
+        await message.answer("Noto‘g‘ri miqdor")
+        return
+
+    target = await db.get_user_by_username(target_username)
+    target_id = target["user_id"] if target else user.id
+    await db.add_stars(int(target_id), amount)
+    await message.answer(f"{('@'+target_username) if target else '(self)'} ga {amount} ⭐ qo‘shildi.")
+
+
