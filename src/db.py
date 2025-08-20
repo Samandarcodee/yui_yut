@@ -1,5 +1,12 @@
+"""Database operations with SQLite and security measures."""
+
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
 import aiosqlite
-from typing import Optional, Tuple, List, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 DB_PATH = "uyin.sqlite3"
 
@@ -81,12 +88,17 @@ async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         # executescript allows multiple statements at once
         await db.executescript(
-            CREATE_USERS_SQL + "\n" +
-            CREATE_INDEXES_SQL + "\n" +
-            CREATE_STATS_SQL + "\n" +
-            CREATE_SPINS_LOG_SQL + "\n" +
-            CREATE_PAYMENTS_SQL + "\n" +
-            CREATE_DAILY_BONUS_SQL
+            CREATE_USERS_SQL
+            + "\n"
+            + CREATE_INDEXES_SQL
+            + "\n"
+            + CREATE_STATS_SQL
+            + "\n"
+            + CREATE_SPINS_LOG_SQL
+            + "\n"
+            + CREATE_PAYMENTS_SQL
+            + "\n"
+            + CREATE_DAILY_BONUS_SQL
         )
         await db.commit()
         # Lightweight migration for added columns if existing DB
@@ -101,20 +113,41 @@ async def upsert_user(
     referred_by: Optional[int] = None,
     initial_spins: int = 0,
 ) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        # Try insert; if exists, update basic fields
-        await db.execute(
-            """
-            INSERT INTO users(user_id, username, first_name, last_name, referred_by, spins)
-            VALUES(?, ?, ?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username=excluded.username,
-                first_name=excluded.first_name,
-                last_name=excluded.last_name
-            """,
-            (user_id, username, first_name, last_name, referred_by, initial_spins),
-        )
-        await db.commit()
+    """Securely insert or update user with input validation."""
+    if user_id <= 0:
+        raise ValueError("Invalid user_id")
+
+    # Sanitize string inputs
+    username = (username or "").strip()[:50] if username else None
+    first_name = (first_name or "").strip()[:100] if first_name else None
+    last_name = (last_name or "").strip()[:100] if last_name else None
+
+    # Validate referred_by
+    if referred_by is not None and (referred_by <= 0 or referred_by == user_id):
+        referred_by = None
+
+    # Validate initial_spins
+    initial_spins = max(0, min(initial_spins, 1000))  # Cap at 1000
+
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Use parameterized queries to prevent SQL injection
+            await db.execute(
+                """
+                INSERT INTO users(user_id, username, first_name, last_name, referred_by, spins)
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username=excluded.username,
+                    first_name=excluded.first_name,
+                    last_name=excluded.last_name
+                """,
+                (user_id, username, first_name, last_name, referred_by, initial_spins),
+            )
+            await db.commit()
+            logger.debug(f"User {user_id} upserted successfully")
+    except Exception as e:
+        logger.error(f"Failed to upsert user {user_id}: {e}")
+        raise
 
 
 async def _migrate_users_table(db: aiosqlite.Connection) -> None:
@@ -124,12 +157,14 @@ async def _migrate_users_table(db: aiosqlite.Connection) -> None:
     async with db.execute("PRAGMA table_info(users)") as cur:
         async for row in cur:
             cols.append(row[1])  # name
+
     async def add(col: str, ddl: str) -> None:
         if col not in cols:
             try:
                 await db.execute(f"ALTER TABLE users ADD COLUMN {ddl}")
             except Exception:
                 pass
+
     await add("is_banned", "is_banned INTEGER NOT NULL DEFAULT 0")
     await add("free_play", "free_play INTEGER NOT NULL DEFAULT 0")
     await add("vip_level", "vip_level INTEGER NOT NULL DEFAULT 0")
@@ -149,19 +184,53 @@ async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
 
 
 async def add_spins(user_id: int, amount: int) -> None:
+    """Add spins to user account with validation and logging."""
     if amount == 0:
         return
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET spins = MAX(spins + ?, 0) WHERE user_id=?", (amount, user_id))
-        await db.commit()
+    
+    # Validate inputs
+    if user_id <= 0:
+        raise ValueError("Invalid user_id")
+    if abs(amount) > 10000:  # Prevent extreme values
+        raise ValueError("Amount too large")
+    
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Use MAX to prevent negative spins
+            await db.execute(
+                "UPDATE users SET spins = MAX(spins + ?, 0) WHERE user_id=?", 
+                (amount, user_id)
+            )
+            await db.commit()
+            logger.debug(f"Added {amount} spins to user {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to add spins to user {user_id}: {e}")
+        raise
 
 
 async def add_stars(user_id: int, amount: int) -> None:
+    """Add stars to user account with validation and logging."""
     if amount == 0:
         return
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET stars = MAX(stars + ?, 0) WHERE user_id=?", (amount, user_id))
-        await db.commit()
+    
+    # Validate inputs
+    if user_id <= 0:
+        raise ValueError("Invalid user_id")
+    if abs(amount) > 100000:  # Prevent extreme values
+        raise ValueError("Amount too large")
+    
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            # Use MAX to prevent negative stars
+            await db.execute(
+                "UPDATE users SET stars = MAX(stars + ?, 0) WHERE user_id=?", 
+                (amount, user_id)
+            )
+            await db.commit()
+            logger.debug(f"Added {amount} stars to user {user_id}")
+    except Exception as e:
+        logger.error(f"Failed to add stars to user {user_id}: {e}")
+        raise
 
 
 async def set_biggest_win_if_greater(user_id: int, value: int) -> None:
@@ -359,7 +428,9 @@ async def compute_kpis() -> Dict[str, Any]:
             total_users = int(row[0]) if row else 0
         out["users"] = total_users
         # Conversion, ARPU
-        async with db.execute("SELECT COUNT(DISTINCT user_id), COALESCE(SUM(stars),0) FROM payments WHERE kind='stars_invoice'") as cur:
+        async with db.execute(
+            "SELECT COUNT(DISTINCT user_id), COALESCE(SUM(stars),0) FROM payments WHERE kind='stars_invoice'"
+        ) as cur:
             row = await cur.fetchone()
             payers = int(row[0]) if row else 0
             revenue = int(row[1]) if row else 0
@@ -368,5 +439,3 @@ async def compute_kpis() -> Dict[str, Any]:
         out["conversion"] = (payers / total_users) if total_users else 0.0
         out["arpu_stars"] = (revenue / total_users) if total_users else 0.0
         return out
-
-

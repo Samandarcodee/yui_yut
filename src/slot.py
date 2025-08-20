@@ -2,7 +2,6 @@ import random
 from dataclasses import dataclass
 from typing import List, Tuple
 
-
 SYMBOLS = [
     "💎",
     "🔔",
@@ -70,5 +69,3 @@ def spin(with_house_edge: bool = True) -> SpinResult:
     reels = _random_reels()
     payout = _compute_payout(reels)
     return SpinResult(reels=reels, payout=payout, is_win=payout > 0)
-
-

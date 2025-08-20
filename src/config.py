@@ -1,9 +1,14 @@
+"""Configuration management with environment variables and validation."""
+
+import logging
 import os
 from dataclasses import dataclass
-from typing import List
 from pathlib import Path
+from typing import List
 
-from dotenv import load_dotenv, dotenv_values
+from dotenv import dotenv_values, load_dotenv
+
+logger = logging.getLogger(__name__)
 
 
 # Load .env from project root (parent of src)
@@ -42,21 +47,38 @@ def _parse_admin_ids(raw: str | None) -> List[int]:
 
 
 def get_settings() -> Settings:
+    """Load and validate all configuration settings."""
     # Try env first, then fallback parsed values
     token = (os.getenv("BOT_TOKEN") or _FALLBACK_VALUES.get("BOT_TOKEN") or "").strip()
     if not token:
         raise RuntimeError("BOT_TOKEN is required in .env")
 
+    # Validate token format
+    if not (token.count(":") == 1 and len(token.split(":")[0]) >= 8):
+        logger.warning("BOT_TOKEN format may be invalid")
+
+    # Sanitize and validate other settings
+
     admin_ids = _parse_admin_ids(os.getenv("ADMIN_IDS") or _FALLBACK_VALUES.get("ADMIN_IDS"))
     channel_username = os.getenv("CHANNEL_USERNAME") or _FALLBACK_VALUES.get("CHANNEL_USERNAME")
     referral_bonus = int(os.getenv("REFERRAL_BONUS") or _FALLBACK_VALUES.get("REFERRAL_BONUS") or "5")
-    simulate_donation = (os.getenv("SIMULATE_DONATION") or _FALLBACK_VALUES.get("SIMULATE_DONATION") or "true").lower() in {"1", "true", "yes"}
-    provider_token = ((os.getenv("PROVIDER_TOKEN") or _FALLBACK_VALUES.get("PROVIDER_TOKEN") or "").strip() or None)
-    stars_enabled = (os.getenv("STARS_ENABLED") or _FALLBACK_VALUES.get("STARS_ENABLED") or "true").lower() in {"1", "true", "yes"}
+    simulate_donation = (
+        os.getenv("SIMULATE_DONATION") or _FALLBACK_VALUES.get("SIMULATE_DONATION") or "true"
+    ).lower() in {"1", "true", "yes"}
+    provider_token = (os.getenv("PROVIDER_TOKEN") or _FALLBACK_VALUES.get("PROVIDER_TOKEN") or "").strip() or None
+    stars_enabled = (os.getenv("STARS_ENABLED") or _FALLBACK_VALUES.get("STARS_ENABLED") or "true").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
     daily_bonus_spins = int(os.getenv("DAILY_BONUS_SPINS") or _FALLBACK_VALUES.get("DAILY_BONUS_SPINS") or "5")
     initial_spins = int(os.getenv("INITIAL_SPINS") or _FALLBACK_VALUES.get("INITIAL_SPINS") or "5")
     mandatory_channel = os.getenv("MANDATORY_CHANNEL") or _FALLBACK_VALUES.get("MANDATORY_CHANNEL")
-    win_adds_spins = (os.getenv("WIN_ADDS_SPINS") or _FALLBACK_VALUES.get("WIN_ADDS_SPINS") or "true").lower() in {"1", "true", "yes"}
+    win_adds_spins = (os.getenv("WIN_ADDS_SPINS") or _FALLBACK_VALUES.get("WIN_ADDS_SPINS") or "true").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
     return Settings(
         bot_token=token,
@@ -71,5 +93,3 @@ def get_settings() -> Settings:
         mandatory_channel=mandatory_channel,
         win_adds_spins=win_adds_spins,
     )
-
-
