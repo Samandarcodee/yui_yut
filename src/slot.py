@@ -54,9 +54,9 @@ def _compute_payout(reels: Tuple[str, str, str]) -> int:
 
 
 def spin(with_house_edge: bool = True) -> SpinResult:
-    # Uy tomoni uchun ustunlikni ta'minlash maqsadida
+    # 50/50 adolatli o'yin - foydalanuvchi uchun yaxshiroq
     # g'alaba/ mag'lubiyat sinfiga mos kelguncha qayta aralashtirish qilinadi
-    target_is_win = random.random() < 0.7 if with_house_edge else None
+    target_is_win = random.random() < 0.5 if with_house_edge else None
 
     for _ in range(50):  # safety cap
         reels = _random_reels()

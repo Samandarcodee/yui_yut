@@ -21,7 +21,7 @@ def test_payout_calculation():
 
 
 def test_house_edge():
-    """Test that house edge maintains ~70% win rate."""
+    """Test that game maintains ~50% win rate (fair game)."""
     wins = 0
     total_spins = 1000
 
@@ -31,8 +31,8 @@ def test_house_edge():
             wins += 1
 
     win_rate = wins / total_spins
-    # Allow 5% variance
-    assert 0.65 <= win_rate <= 0.75, f"Win rate {win_rate:.2%} outside expected range"
+    # Allow 5% variance for 50/50
+    assert 0.45 <= win_rate <= 0.55, f"Win rate {win_rate:.2%} outside expected range"
 
 
 def test_no_house_edge():

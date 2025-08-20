@@ -367,7 +367,7 @@ async def cmd_start(message: Message) -> None:
         f"🎊 <b>Slot o'yiniga xush kelibsiz!</b>\n\n"
         f"🎁 <b>{settings.initial_spins} BEPUL SPIN</b> bilan start!\n"
         f"📅 Har kuni <b>BONUS</b> oling\n"
-        f"🍀 <b>70% YUTISH IMKONIYATI!</b>\n\n"
+        f"🍀 <b>50% YUTISH - ADOLATLI O'YIN!</b>\n\n"
         f"⬇️ <b>Menyudan tanlang:</b>",
         reply_markup=main_menu(),
     )
@@ -1072,3 +1072,4 @@ async def cmd_addstars(message: Message) -> None:
     target_id = target["user_id"] if target else user.id
     await db.add_stars(int(target_id), amount)
     await message.answer(f"{('@'+target_username) if target else '(self)'} ga {amount} ⭐ qo‘shildi.")
+INI 
