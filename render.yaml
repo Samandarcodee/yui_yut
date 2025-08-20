@@ -4,11 +4,11 @@ services:
     env: python
     region: frankfurt
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --only-binary=all -r requirements.txt
     startCommand: python main.py
     envVars:
       - key: BOT_TOKEN
-        sync: false
+        sync: false  # Set this manually in Render dashboard
       - key: ADMIN_IDS
         value: "5928372261"
       - key: STARS_ENABLED
@@ -23,4 +23,6 @@ services:
         value: "5"
       - key: DAILY_BONUS_SPINS
         value: "5"
+      - key: PYTHONPATH
+        value: "/opt/render/project/src"
     autoDeploy: true

@@ -51,12 +51,18 @@ def get_settings() -> Settings:
     # Try env first, then fallback parsed values
     token = (os.getenv("BOT_TOKEN") or _FALLBACK_VALUES.get("BOT_TOKEN") or "").strip()
     if not token:
-        raise RuntimeError("BOT_TOKEN is required in .env")
-
+        # In production, show helpful error message
+        env_path = os.getenv("ENV_PATH", ".env")
+        raise RuntimeError(
+            f"BOT_TOKEN is required!\n"
+            f"Set environment variable: export BOT_TOKEN=your_token\n"
+            f"Or create {env_path} file with: BOT_TOKEN=your_token"
+        )
+    
     # Validate token format
     if not (token.count(":") == 1 and len(token.split(":")[0]) >= 8):
         logger.warning("BOT_TOKEN format may be invalid")
-
+    
     # Sanitize and validate other settings
 
     admin_ids = _parse_admin_ids(os.getenv("ADMIN_IDS") or _FALLBACK_VALUES.get("ADMIN_IDS"))
