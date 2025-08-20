@@ -25,6 +25,7 @@ class Settings:
     daily_bonus_spins: int
     initial_spins: int  # Yangi foydalanuvchilar uchun boshlang'ich spinlar
     mandatory_channel: str | None  # Majburiy kanal username
+    win_adds_spins: bool
 
 
 def _parse_admin_ids(raw: str | None) -> List[int]:
@@ -53,8 +54,9 @@ def get_settings() -> Settings:
     provider_token = ((os.getenv("PROVIDER_TOKEN") or _FALLBACK_VALUES.get("PROVIDER_TOKEN") or "").strip() or None)
     stars_enabled = (os.getenv("STARS_ENABLED") or _FALLBACK_VALUES.get("STARS_ENABLED") or "true").lower() in {"1", "true", "yes"}
     daily_bonus_spins = int(os.getenv("DAILY_BONUS_SPINS") or _FALLBACK_VALUES.get("DAILY_BONUS_SPINS") or "5")
-    initial_spins = int(os.getenv("INITIAL_SPINS") or _FALLBACK_VALUES.get("INITIAL_SPINS") or "10")
+    initial_spins = int(os.getenv("INITIAL_SPINS") or _FALLBACK_VALUES.get("INITIAL_SPINS") or "5")
     mandatory_channel = os.getenv("MANDATORY_CHANNEL") or _FALLBACK_VALUES.get("MANDATORY_CHANNEL")
+    win_adds_spins = (os.getenv("WIN_ADDS_SPINS") or _FALLBACK_VALUES.get("WIN_ADDS_SPINS") or "true").lower() in {"1", "true", "yes"}
 
     return Settings(
         bot_token=token,
@@ -67,6 +69,7 @@ def get_settings() -> Settings:
         daily_bonus_spins=daily_bonus_spins,
         initial_spins=initial_spins,
         mandatory_channel=mandatory_channel,
+        win_adds_spins=win_adds_spins,
     )
 
 
