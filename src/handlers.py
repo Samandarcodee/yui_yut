@@ -1071,5 +1071,4 @@ async def cmd_addstars(message: Message) -> None:
     target = await db.get_user_by_username(target_username)
     target_id = target["user_id"] if target else user.id
     await db.add_stars(int(target_id), amount)
-    await message.answer(f"{('@'+target_username) if target else '(self)'} ga {amount} ⭐ qo‘shildi.")
-INI 
+    await message.answer(f"{('@'+target_username) if target else '(self)'} ga {amount} ⭐ qo'shildi.")
