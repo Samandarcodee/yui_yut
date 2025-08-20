@@ -367,7 +367,7 @@ async def cmd_start(message: Message) -> None:
         f"🎊 <b>Slot o'yiniga xush kelibsiz!</b>\n\n"
         f"🎁 <b>{settings.initial_spins} BEPUL SPIN</b> bilan start!\n"
         f"📅 Har kuni <b>BONUS</b> oling\n"
-        f"🍀 <b>50% YUTISH - ADOLATLI O'YIN!</b>\n\n"
+        f"🍀 <b>Omad sizga tabassum qilsin!</b>\n\n"
         f"⬇️ <b>Menyudan tanlang:</b>",
         reply_markup=main_menu(),
     )
