@@ -1,14 +1,9 @@
 """
-🎰 Slot Game Bot — Vercel Webhook Handler (Simplified)
+🎰 Slot Game Bot — Vercel Webhook Handler (Ultra Simplified)
 """
 import os
 import json
-import logging
 from aiohttp import web
-
-# Simple logging setup for Vercel
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Bot token from environment
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -19,17 +14,15 @@ async def webhook_handler(request):
     try:
         # Parse update
         update_data = await request.json()
-        logger.info(f"Received update: {update_data}")
         
-        # Basic response for now
+        # Basic response
         return web.json_response({
             "status": "success",
             "message": "Update received",
-            "update_id": update_data.get("update_id", "unknown")
+            "bot_token_set": bool(BOT_TOKEN)
         })
         
     except Exception as e:
-        logger.error(f"Webhook error: {e}")
         return web.json_response({
             "status": "error",
             "message": str(e)
@@ -51,7 +44,6 @@ app = web.Application()
 # Routes
 app.router.add_post("/api/webhook", webhook_handler)
 app.router.add_get("/", health_check)
-app.router.add_get("/health", health_check)
 
 # For local development
 if __name__ == "__main__":
