@@ -4,20 +4,36 @@
     {
       "src": "api/webhook.py",
       "use": "@vercel/python"
+    },
+    {
+      "src": "api/test.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
     {
       "src": "/api/webhook",
-      "dest": "api/webhook.py"
+      "dest": "/api/webhook.py"
+    },
+    {
+      "src": "/api/test",
+      "dest": "/api/test.py"
     },
     {
       "src": "/",
-      "dest": "api/webhook.py"
+      "dest": "/api/webhook.py"
+    },
+    {
+      "src": "/health",
+      "dest": "/api/webhook.py"
     }
   ],
-  "env": {
-    "BOT_TOKEN": "@bot_token",
-    "WEBHOOK_URL": "@webhook_url"
+  "functions": {
+    "api/webhook.py": {
+      "maxDuration": 30
+    },
+    "api/test.py": {
+      "maxDuration": 10
+    }
   }
 }
