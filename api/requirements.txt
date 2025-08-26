@@ -1,2 +1,1 @@
-# Vercel deployment uchun minimal requirements
-aiohttp>=3.8.0
+aiohttp==3.8.5
